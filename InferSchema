@@ -1,0 +1,42 @@
+--SIDE NOTE OF SOME OTHER FEATURES IN SNOWFLAKE WHEN DEALING WITH SNOWFLAKE
+
+--Show how to use the gui to upload a file
+
+--https://docs.snowflake.com/en/_downloads/0c1e6c4f4140561029eeb20afdd02664/cities.parquet
+--Create Stage internally!
+
+
+use database cybersyn;
+use schema public;
+use role sysadmin;
+use warehouse compute_wh;
+
+
+CREATE OR REPLACE FILE FORMAT my_json_format
+  TYPE = JSON
+  strip_outer_array = true;
+
+
+SELECT *
+  FROM TABLE(
+    INFER_SCHEMA(
+      LOCATION=>'@cybersyn_sec_filings/cybersyn_sec_report_index.json.gz'
+      , FILE_FORMAT=>'my_json_format'
+      )
+    );
+
+--create the table DDL using schema inference
+CREATE OR REPLACE TABLE infer_schema_example
+  USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+      FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@cybersyn_sec_filings/cybersyn_sec_report_index.json.gz',
+          FILE_FORMAT=>'my_json_format'
+        )
+      ));
+
+--confirm that the table was created as expected
+DESC TABLE infer_schema_example;
+
+select * from infer_schema_example;
