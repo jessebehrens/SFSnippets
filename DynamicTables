@@ -1,0 +1,156 @@
+/*Select our role!!*/
+use role accountadmin;
+
+CREATE OR REPLACE WAREHOUSE adhoc WITH
+     WAREHOUSE_SIZE='X-SMALL'
+     AUTO_SUSPEND = 120
+     AUTO_RESUME = TRUE
+     INITIALLY_SUSPENDED=TRUE;
+
+
+-- Slowly Changing Dimension demo with Dynamic Tables
+-- Source: https://medium.com/snowflake/slowly-changing-dimensions-with-dynamic-tables-d0d76582ff31
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE ADHOC;
+
+CREATE OR REPLACE DATABASE DIMENSIONAL_DEMO;
+USE DATABASE DIMENSIONAL_DEMO;
+CREATE SCHEMA IF NOT EXISTS DIMENSIONAL_DEMO.SCD_DT;
+
+/****************************************************************************/
+/*                  SCD With Complete State Records
+/****************************************************************************/
+
+
+-- SCD With Complete State Records - any changes in customer information result in a new complete record — a record with all columns populated
+CREATE OR REPLACE TABLE CUSTOMER_CHANGES (
+  CUSTOMER_ID INT,
+  FIRST_NAME VARCHAR(50),
+  LAST_NAME VARCHAR(50),
+  EMAIL VARCHAR(100),
+  PHONE_NUMBER VARCHAR(15),
+  FULL_ADDRESS VARCHAR(365),
+  UPDATE_TIME TIMESTAMP_NTZ(9)
+);
+
+----SOURCE TABLE-------
+
+INSERT INTO CUSTOMER_CHANGES VALUES
+(1, 'John', 'Doe', 'john.doe@example.com', '1234567890', '123 Main St, New York, NY, 10001', '2023-05-25 10:00:00'),
+(2, 'Jane', 'Smith', 'jane.smith@example.com', '0987654321', '456 Pine St, San Francisco, CA, 94101', '2023-05-25 11:00:00'),
+(1, 'John', 'Doe', 'john.doe2@example.com', '1234567890', '789 Broadway St, New York, NY, 10002', '2023-05-25 12:00:00'),
+(3, 'Jim', 'Brown', 'jim.brown@example.com', '1122334455', '321 Elm St, Chicago, IL, 60601', '2023-05-25 13:00:00'),
+(2, 'Jane', 'Smith', 'jane.smith2@example.com', '0987654322', '654 Oak St, San Francisco, CA, 94102', '2023-05-25 14:00:00');
+
+select * from customer_changes;
+
+-- Create a Type 2 SCD historical table
+-- It can be used for historical analysis and to join data to a particular version of a customer’s information using the surrogate key “CUSTOMER_HISTORY_SK” which is unique to each record in the table.
+
+---SCD-2 HISTORY TABLE-------
+CREATE OR REPLACE DYNAMIC TABLE CUSTOMER_HISTORY
+  TARGET_LAG='1 MINUTE'
+  WAREHOUSE=ADHOC
+AS
+SELECT * RENAME (UPDATE_TIME AS RECORD_START_TIME),
+  CUSTOMER_ID || '-' || DATE_PART(EPOCH_MILLISECONDS, UPDATE_TIME) AS CUSTOMER_HISTORY_SK,
+  SPLIT_PART(FULL_ADDRESS, ' ', -1) AS POSTAL_CODE,
+  LEAD(UPDATE_TIME) OVER (PARTITION BY CUSTOMER_ID ORDER BY UPDATE_TIME ASC) AS RECORD_END_TIME
+FROM CUSTOMER_CHANGES;
+
+----CHECK IT OUT------
+
+SELECT * FROM CUSTOMER_HISTORY; -- All records
+
+-- Create Type 1 SCD table - live table that always contains only the current record for each customer:
+CREATE OR REPLACE DYNAMIC TABLE CUSTOMERS
+  TARGET_LAG='1 MINUTE'
+  WAREHOUSE=ADHOC
+AS
+SELECT * EXCLUDE (CUSTOMER_HISTORY_SK, RECORD_END_TIME)
+FROM CUSTOMER_HISTORY
+WHERE RECORD_END_TIME IS NULL;
+
+
+---THESE CUSTOMERS will only keep live recordsCURRENT_DATE--
+SELECT * FROM CUSTOMERS; -- Only current records
+
+/****Say the base data changes - ADD A ROW TO CUSTOMER CHANGES - JESSE EDIT****/
+INSERT INTO CUSTOMER_CHANGES VALUES
+(4, 'Jesse', 'Fake', 'Jesse.Fake@example.com', '919123321456', '123 Main St, Raleigh, NC, 27609', '2023-05-25 15:00:00');
+
+/*View the data**/
+select * from customer_changes;
+select * from customers;  /*Wait a minute*/
+
+/****************************************************************************/
+/*                  SCD With Complete Data Records
+/****************************************************************************/
+
+
+-- SCD With Incomplete State Changes and Joins to Other Dimension Tables
+-- Some input systems deliver incomplete update records, including only the natural key, any changed columns, and a time stamp. This requires more extensive use of window functions in the SCD type 2 historical table to backfill attributes that haven’t changed. Dynamic Tables both simplify the management of such schemas and make it simple to enhance dimension tables by joining with other data sources.
+
+
+
+-- To keep
+-- Slowly Changing Dimension demo with Dynamic Tables
+-- Source: https://medium.com/snowflake/slowly-changing-dimensions-with-dynamic-tables-d0d76582ff31
+
+USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE ADHOC;
+
+----What about membership changes-------
+
+CREATE OR REPLACE TABLE MEMBERSHIP_CHANGES (
+  CUSTOMER_ID INT,
+  MEMBERSHIP_LEVEL VARCHAR(50),
+  REWARDS_POINTS INT,
+  DISCOUNT_RATE DECIMAL(4,2),
+  UPDATE_TIME TIMESTAMP_NTZ(9));
+
+select * from membership_changes;
+
+INSERT INTO MEMBERSHIP_CHANGES VALUES
+(1, 'Gold', 12000, 0.15, '2023-05-25 10:00:00'),
+(2, 'Silver', 8000, 0.10, '2023-05-25 12:00:00'),
+(3, 'Platinum', 15000, 0.20, '2023-05-25 16:00:00'),
+(1, 'Platinum', NULL, 0.25, '2023-05-25 13:00:00'),
+(2, NULL, NULL, 0.15, '2023-05-25 14:00:00');
+
+select * from membership_changes;
+
+
+//To keep a comprehensive history of each membership update containing all columns, we establish a Type 2 SCD Dynamic Table. This table utilizes the LAG() function to trace preceding non-null values for each column. Additionally, the Dynamic Table finds the surrogate key corresponding to the customer record active at the time of each membership update:
+
+CREATE OR REPLACE DYNAMIC TABLE MEMBERSHIP_HISTORY
+  TARGET_LAG='1 MINUTE'
+  WAREHOUSE=ADHOC
+AS
+SELECT
+  M.CUSTOMER_ID,
+  M.CUSTOMER_ID || '-' || DATE_PART(EPOCH_MILLISECONDS, M.UPDATE_TIME) AS MEMBERSHIP_HISTORY_SK,
+  C.CUSTOMER_HISTORY_SK,
+  IFNULL(M.MEMBERSHIP_LEVEL, LAG(M.MEMBERSHIP_LEVEL) IGNORE NULLS OVER (PARTITION BY M.CUSTOMER_ID ORDER BY M.UPDATE_TIME ASC)) AS MEMBERSHIP_LEVEL,
+  IFNULL(M.REWARDS_POINTS, LAG(M.REWARDS_POINTS) IGNORE NULLS OVER (PARTITION BY M.CUSTOMER_ID ORDER BY M.UPDATE_TIME ASC)) AS REWARDS_POINTS,
+  IFNULL(M.DISCOUNT_RATE, LAG(M.DISCOUNT_RATE) IGNORE NULLS OVER (PARTITION BY M.CUSTOMER_ID ORDER BY M.UPDATE_TIME ASC)) AS DISCOUNT_RATE,
+  M.UPDATE_TIME AS RECORD_START_TIME,
+  LEAD(M.UPDATE_TIME) OVER (PARTITION BY M.CUSTOMER_ID ORDER BY M.UPDATE_TIME ASC) AS RECORD_END_TIME
+FROM MEMBERSHIP_CHANGES M 
+LEFT OUTER JOIN CUSTOMER_HISTORY C
+  ON M.CUSTOMER_ID = C.CUSTOMER_ID
+WHERE C.RECORD_START_TIME <= M.UPDATE_TIME AND
+  (M.UPDATE_TIME < C.RECORD_END_TIME OR C.RECORD_END_TIME IS NULL);
+
+SELECT * FROM MEMBERSHIP_HISTORY;
+
+/*Update a row*/
+INSERT INTO MEMBERSHIP_CHANGES
+VALUES
+(2, 'Bronze', NULL, NULL, '2023-05-25 13:00:00');
+
+select * from membership_changes;
+
+select * from membership_history;
+
