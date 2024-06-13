@@ -1,0 +1,47 @@
+use database cybersyn;
+use schema public;
+use role accountadmin;
+use warehouse compute_wh;
+
+-----Create a ROW POLICY MAP-------
+CREATE OR REPLACE TABLE cybersyn.public.row_policy_map
+    (role STRING, PRIMARY_EXCHANGE_CODE_PERMISSIONS STRING);
+
+--Insert the policies you want to follow table to follow. For simplicity we will store this in cybersyn
+--A better policy would be a security database
+
+INSERT INTO cybersyn.public.row_policy_map
+    VALUES 
+        ('JUNIOR_DBA','NYS'); -- junior_dba should only see NYS Companies
+
+--Review our table--
+select * from row_policy_map;
+
+--Let's create our row access policy from our mapping table
+CREATE OR REPLACE ROW ACCESS POLICY cybersyn.public.analyst_exchange_policy
+    AS (PRIMARY_EXCHANGE_CODE STRING) RETURNS BOOLEAN ->
+       CURRENT_ROLE() IN -- list of roles that will not be subject to the policy  
+           (
+            'ACCOUNTADMIN','SYSADMIN'
+           )
+        OR EXISTS -- this clause references our mapping table from above to handle the row level filtering
+            (
+            SELECT rp.role 
+                FROM cybersyn.public.row_policy_map rp
+            WHERE 1=1
+                AND rp.role = CURRENT_ROLE()
+                AND rp.PRIMARY_EXCHANGE_CODE_PERMISSIONS = PRIMARY_EXCHANGE_CODE
+            );
+
+--Apply the row access policies to our table
+ALTER TABLE cybersyn.public.company_metadata
+    ADD ROW ACCESS POLICY cybersyn.public.analyst_exchange_policy ON (primary_exchange_code);
+
+            
+-----See Account Admin----
+use role accountadmin;
+select * from company_metadata;
+
+---See from junior DBA--
+use role junior_dba;
+select * from company_metadata;
