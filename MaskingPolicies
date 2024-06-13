@@ -1,0 +1,63 @@
+--Creat masking policies;
+use role accountadmin;
+use warehouse compute_wh;
+use database cybersyn;
+use schema public;
+
+--Grant the ability for the junior role to leverage data in our cybersyn account
+grant usage on schema cybersyn.public to role junior_dba;
+grant select on table company_metadata to role junior_dba;
+
+--Switch roles--
+use role junior_dba;
+select * from company_metadata;
+
+--Uh oh! I don't want to be able to see the primary ticket or company name! Let's mask this
+use role accountadmin;
+
+---- Let's create tags on our objects
+CREATE OR REPLACE TAG cybersyn.public.company_identifier COMMENT = 'Company Name Identifier';
+
+--Show the tags
+show tags;
+
+--Apply the tags to the columns
+ALTER TABLE company_metadata 
+    MODIFY COLUMN cybersyn_company_id 
+        SET TAG cybersyn.public.company_identifier = 'Company ID';
+
+ALTER TABLE company_metadata 
+    MODIFY COLUMN company_name 
+        SET TAG cybersyn.public.company_identifier = 'Company Name';
+        
+ALTER TABLE company_metadata 
+    MODIFY COLUMN primary_ticker
+        SET TAG cybersyn.public.company_identifier = 'Company Ticker';
+
+---Show tags
+describe table company_metadata;
+
+--Let's see what tags have been applied to my table
+SELECT * FROM TABLE(cybersyn.information_schema.tag_references_all_columns ('cybersyn.public.company_metadata','table'));
+
+--Now let's create a masking policy on this Row
+
+
+--Create the policy
+CREATE OR REPLACE MASKING POLICY cybersyn.public.company_id_mask AS (val STRING) RETURNS STRING ->
+    CASE 
+        WHEN CURRENT_ROLE() IN ('SYSADMIN', 'ACCOUNTADMIN') THEN val
+    ELSE '**~MASKED~**'
+END;
+
+--Apply the policy to the tag. Note: Policies can be done to tags or columns
+ALTER TAG cybersyn.public.company_identifier SET MASKING POLICY cybersyn.public.company_id_mask;
+
+---Let's query our table--
+select * from company_metadata;
+
+--But what about our junor DBA--
+use role junior_dba;
+select * from company_metadata;
+
+--But What if I only want to see the NYS??
